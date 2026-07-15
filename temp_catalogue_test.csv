@@ -1,0 +1,9 @@
+type,nom,caracteristique,prix
+panneau,Panneau 230Wc,230,77000
+panneau,Panneau 400Wc,400,220000
+batterie,Batterie 100Ah,100,570000
+batterie,Batterie 200Ah,200,1800000
+batterie,Batterie 400Ah,400,5400000
+onduleur,Onduleur 7kW,7000,945000
+onduleur,Onduleur 5kW,5000,820000
+onduleur,Onduleur 3kW,3000,620000
