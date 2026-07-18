@@ -778,10 +778,6 @@ def executer_dimensionnement(config):
             "type_menage_utilise": type_menage_utilise, "lolp_cible": lolp_cible,
             "avertissements": avertissements}
 
-    return {"succes": True, "configuration_recommandee": meilleure_config,
-            "type_menage_utilise": type_menage_utilise, "lolp_cible": lolp_cible,
-            "avertissements": avertissements}
-
 
 def generer_fichiers_exemple(dossier="."):
     """Écrit 3 fichiers CSV d'exemple (bon format), remplis de données plausibles."""
@@ -1006,8 +1002,9 @@ def _generer_docx(chemin, contenu_texte, resultat_dict=None, image_path=None):
     document.add_heading("Commentaires sur le schéma", level=2)
     document.add_paragraph(
         "Cette page contient une analyse de la simulation et du schéma de fiabilité. "
-        "Le graphique inclus illustre la robustesse des recommandations de dimensionnement "
-        "lorsque l'algorithme est relancé plusieurs fois avec la même configuration de référence."
+        "Le graphique inclus illustre, selon le contexte, soit la projection de fiabilité de "
+        "l'installation, soit la convergence de l'estimation Monte Carlo en fonction du nombre "
+        "d'itérations simulées."
     )
 
     if resultat_dict is not None:
@@ -1032,9 +1029,10 @@ def _generer_docx(chemin, contenu_texte, resultat_dict=None, image_path=None):
             document.add_heading("Figure générée", level=2)
             document.add_picture(image_path, width=Inches(6))
             document.add_paragraph(
-                "La figure ci-dessus présente un boxplot des recommandations de dimensionnement obtenues "
-                "sur plusieurs exécutions indépendantes. Une forte concentration des nombres de panneaux et "
-                "de batteries autour d'une même valeur indique une recommandation robuste face au bruit de simulation."
+                "La figure ci-dessus présente la courbe de convergence Monte Carlo : la fiabilité moyenne "
+                "cumulée de l'installation en fonction du nombre d'itérations (trajectoires) simulées. "
+                "Une stabilisation de la courbe autour d'une valeur horizontale indique que le nombre "
+                "d'itérations utilisé est suffisant pour obtenir une estimation fiable."
             )
         except Exception:
             document.add_paragraph("[L'image n'a pas pu être insérée dans le document Word.]")
@@ -1407,65 +1405,49 @@ def construire_onglet_dimensionnement(onglet, fenetre_racine):
     zone.grid(row=5, column=0, sticky="nsew", padx=15, pady=(0, 15))
 
 
-def preparer_donnees_monte_carlo():
-    """Construit une analyse de robustesse en répétant plusieurs fois la procédure de dimensionnement."""
-    chemin_catalogue = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "temp_catalogue_test.csv"))
-    if not os.path.isfile(chemin_catalogue):
-        raise DualSolarStatError(
-            "Catalogue de test introuvable pour l'analyse de robustesse Monte Carlo. "
-            "Placez le fichier temp_catalogue_test.csv à la racine du projet."
-        )
+def preparer_donnees_monte_carlo(n_repetitions=4000):
+    """
+    Construit une courbe de CONVERGENCE MONTE CARLO : on simule n_repetitions
+    trajectoires indépendantes de l'installation de référence (cas test) et on
+    calcule, pour chaque nombre croissant de trajectoires prises en compte
+    (1, 2, 3, ..., n_repetitions), le pourcentage moyen de fiabilité estimé
+    jusque-là (moyenne cumulative). Cela illustre concrètement comment
+    l'estimation Monte Carlo se stabilise (converge) à mesure que le nombre
+    d'itérations augmente — au début elle oscille beaucoup (peu de tirages),
+    puis elle se stabilise autour de la vraie valeur quand n grandit.
+    """
+    parametres = dict(DEFAUTS)  # la structure test (cas Mairie de Boulsa) sert de référence
 
-    config = {
-        "fichier_catalogue": chemin_catalogue,
-        "budget_max": 15_000_000,
-        "surface_max_m2": 200.0,
-        "type_menage": TYPE_MENAGE_PAR_DEFAUT,
-        "fichier_consommation": None,
-        "fichier_meteo": None,
-        "n_repetitions_par_config": 180,
-    }
+    resultats = simuler_installation(
+        DEFAUTS["n_panneaux_test"],
+        DEFAUTS["n_batteries_test"],
+        n_repetitions,
+        parametres,
+        n_jours=365,
+        lolp_cible=TYPES_MENAGE[TYPE_MENAGE_PAR_DEFAUT]["lolp_cible"],
+        appliquer_degradation=False,
+    )
 
-    def qualifier_dispersion(valeurs):
-        q1, q3 = np.percentile(valeurs, [25, 75])
-        iqr = q3 - q1
-        if iqr == 0:
-            return "très stable"
-        if iqr <= 1:
-            return "relativement stable"
-        if iqr <= 2:
-            return "modérément dispersé"
-        return "fortement dispersé"
+    fiabilite_par_trajectoire = resultats["fiabilite"]  # une valeur par trajectoire simulée
+    moyenne_cumulative_pct = (
+        np.cumsum(fiabilite_par_trajectoire) / np.arange(1, n_repetitions + 1)
+    ) * 100.0
 
-    repetitions = 20
-    panneaux = []
-    batteries = []
-    erreurs = []
-    for _ in range(repetitions):
-        resultat = executer_dimensionnement(config)
-        if not resultat.get("succes"):
-            erreurs.append(resultat.get("erreur", "Erreur inconnue."))
-            continue
-        recommandation = resultat["configuration_recommandee"]
-        panneaux.append(recommandation["n_panneaux"])
-        batteries.append(recommandation["n_batteries"])
-
-    if not panneaux:
-        raise DualSolarStatError(
-            "Impossible de générer l'analyse de robustesse : toutes les exécutions de dimensionnement ont échoué. "
-            f"Erreurs rencontrées : {' ; '.join(erreurs[:3])}"
-        )
+    valeur_finale = float(moyenne_cumulative_pct[-1])
+    # Écart entre la dernière estimation et l'estimation à mi-parcours, pour
+    # quantifier grossièrement la stabilisation de la courbe.
+    ecart_stabilisation = float(abs(moyenne_cumulative_pct[-1] - moyenne_cumulative_pct[n_repetitions // 2]))
 
     texte_resume = (
-        f"Analyse sur {len(panneaux)} répétitions : recommandation panneaux {qualifier_dispersion(panneaux)} "
-        f"(médiane {int(np.median(panneaux))}, étendue {min(panneaux)}–{max(panneaux)}),"
-        f" recommandations batteries {qualifier_dispersion(batteries)} "
-        f"(médiane {int(np.median(batteries))}, étendue {min(batteries)}–{max(batteries)})."
+        f"Convergence sur {n_repetitions} itérations Monte Carlo : la fiabilité moyenne estimée "
+        f"se stabilise autour de {valeur_finale:.2f}% (écart entre la moitié et la fin de la "
+        f"simulation : {ecart_stabilisation:.2f} point(s) de pourcentage)."
     )
 
     return {
-        "serie_panneaux": np.asarray(panneaux, dtype=int),
-        "serie_batteries": np.asarray(batteries, dtype=int),
+        "serie_convergence_pct": moyenne_cumulative_pct,
+        "n_repetitions": n_repetitions,
+        "valeur_finale_pct": valeur_finale,
         "summary": texte_resume,
     }
 
@@ -1477,42 +1459,32 @@ def _enregistrer_figure_temporaire(fig):
 
 
 def afficher_graphe_monte_carlo(frame, donnees, image_state=None):
-    """Affiche un indicateur de robustesse dans un frame Tkinter."""
+    """
+    Affiche la courbe de convergence Monte Carlo dans un frame Tkinter :
+    pourcentage de fiabilité moyenne cumulée en fonction du nombre
+    d'itérations (trajectoires) simulées.
+    """
     for widget in frame.winfo_children():
         widget.destroy()
 
     fig = Figure(figsize=(8.2, 5.2), dpi=100)
     ax = fig.add_subplot(111)
 
-    if isinstance(donnees, dict) and "serie_panneaux" in donnees and "serie_batteries" in donnees:
-        series = [donnees["serie_panneaux"], donnees["serie_batteries"]]
-        labels = ["Panneaux", "Batteries"]
-        bp = ax.boxplot(series, labels=labels, patch_artist=True, showmeans=True, meanline=True)
-        for patch, color in zip(bp["boxes"], ["#4C78A8", "#F58518"]):
-            patch.set_facecolor(color)
-            patch.set_alpha(0.6)
-        for i, serie in enumerate(series, start=1):
-            x = np.full(len(serie), i) + (np.random.rand(len(serie)) - 0.5) * 0.15
-            ax.scatter(x, serie, color="#222222", alpha=0.7, s=24, zorder=10)
+    serie_pct = donnees["serie_convergence_pct"]
+    iterations = np.arange(1, len(serie_pct) + 1)
 
-        ax.set_title("Robustesse du dimensionnement : recommandations répétées")
-        ax.set_xlabel("Type de composant")
-        ax.set_ylabel("Nombre recommandé")
-        ax.grid(True, alpha=0.25, axis="y")
-        fig.tight_layout(rect=[0, 0.05, 1, 1])
-        if donnees.get("summary"):
-            fig.text(0.5, 0.01, donnees["summary"], ha="center", va="bottom", fontsize=9)
-    else:
-        iterations = np.arange(1, len(next(iter(donnees.values()))) + 1)
-        for label, serie in donnees.items():
-            ax.plot(iterations, serie, linewidth=1.8, label=label)
-        ax.set_title("Convergence Monte Carlo")
-        ax.set_xlabel("Nombre de simulations")
-        ax.set_ylabel("Fiabilité moyenne cumulative")
-        ax.set_ylim(0, 1.02)
-        ax.grid(True, alpha=0.3)
-        ax.legend(loc="best")
-        fig.tight_layout()
+    ax.plot(iterations, serie_pct, linewidth=1.6, color="#2FA572", label="Fiabilité moyenne cumulée")
+    ax.axhline(donnees["valeur_finale_pct"], color="#4C78A8", linestyle="--", linewidth=1.2,
+               label=f"Valeur stabilisée ≈ {donnees['valeur_finale_pct']:.2f}%")
+
+    ax.set_title("Convergence Monte Carlo : fiabilité moyenne en fonction du nombre d'itérations")
+    ax.set_xlabel("Nombre d'itérations (trajectoires simulées)")
+    ax.set_ylabel("Fiabilité moyenne cumulée (%)")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="lower right")
+    fig.tight_layout(rect=[0, 0.06, 1, 1])
+    if donnees.get("summary"):
+        fig.text(0.5, 0.01, donnees["summary"], ha="center", va="bottom", fontsize=9)
 
     if image_state is not None:
         image_state["path"] = _enregistrer_figure_temporaire(fig)
@@ -1528,9 +1500,11 @@ def construire_onglet_monte_carlo(onglet, fenetre_racine):
 
     ctk.CTkLabel(
         onglet,
-        text=("Analyse de robustesse du dimensionnement : cette application répète plusieurs fois la procédure "
-              "de dimensionnement sur le même catalogue et compare les nombres de panneaux et de batteries recommandés. "
-              "Le boxplot met en évidence si les propositions se regroupent autour d'une solution stable ou si elles sont dispersées."),
+        text=("Convergence Monte Carlo : cette application simule un grand nombre de trajectoires "
+              "indépendantes (jusqu'à 4000) de l'installation de référence (cas test), puis calcule la "
+              "fiabilité moyenne cumulée après 1, 2, 3, ... itérations. La courbe obtenue montre comment "
+              "cette estimation oscille fortement au départ (peu de tirages) puis se stabilise "
+              "progressivement autour d'une valeur, illustrant la convergence de la méthode Monte Carlo."),
         justify="left",
         anchor="w",
         wraplength=700,
@@ -1548,13 +1522,15 @@ def construire_onglet_monte_carlo(onglet, fenetre_racine):
 
     def exporter_monte_carlo():
         if image_state["path"] is None or not os.path.isfile(image_state["path"]):
-            messagebox.showerror("Aucun graphe", "Générez d'abord l'analyse de robustesse avant d'exporter le rapport Word.")
+            messagebox.showerror("Aucun graphe", "Générez d'abord la courbe de convergence avant d'exporter le rapport Word.")
             return
         texte = (
-            "Rapport de robustesse DualSolarStat\n\n"
-            "Ce document contient une analyse des recommandations de dimensionnement obtenues sur plusieurs exécutions indépendantes.\n"
-            "Le boxplot montre la dispersion des nombres de panneaux et de batteries recommandés, ce qui permet d'estimer "
-            "la stabilité de la solution optimale face au bruit de simulation.\n"
+            "Rapport de convergence Monte Carlo — DualSolarStat\n\n"
+            "Ce document contient la courbe de convergence de l'estimation Monte Carlo de la fiabilité "
+            "de l'installation de référence, en fonction du nombre d'itérations (trajectoires) simulées.\n"
+            "La courbe montre comment l'estimation se stabilise progressivement autour d'une valeur "
+            "lorsque le nombre d'itérations augmente, ce qui permet de juger si le nombre de répétitions "
+            "utilisé ailleurs dans l'application est suffisant.\n"
         )
         exporter_resultat(None, texte, image_path=image_state["path"])
 
@@ -1570,7 +1546,7 @@ def construire_onglet_monte_carlo(onglet, fenetre_racine):
             ],
         )
 
-    bouton = ctk.CTkButton(onglet, text="▶  Générer l'analyse de robustesse", command=lancer)
+    bouton = ctk.CTkButton(onglet, text="▶  Générer la courbe de convergence", command=lancer)
     bouton.grid(row=3, column=0, sticky="w", padx=15, pady=(0, 8))
 
     bouton_exporter = ctk.CTkButton(
@@ -1624,7 +1600,7 @@ class ApplicationDualSolarStat(ctk.CTk):
 
         nom_onglet_1 = "1. Évaluer une installation"
         nom_onglet_2 = "2. Dimensionner une installation"
-        nom_onglet_3 = "3. Robustesse"
+        nom_onglet_3 = "3. Convergence Monte Carlo"
         onglets.add(nom_onglet_1)
         onglets.add(nom_onglet_2)
         onglets.add(nom_onglet_3)

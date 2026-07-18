@@ -2,3 +2,4 @@ customtkinter
 matplotlib
 numpy
 pandas
+python-docx
